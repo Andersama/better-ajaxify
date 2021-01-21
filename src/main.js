@@ -10,6 +10,7 @@
 
     const parser = new DOMParser();
     const domStates = []; // in-memory storage for states
+    var knownUrls = [];
     let lastDomState = {};
 
     function attachNonPreventedListener(target, eventType, callback) {
@@ -94,13 +95,36 @@
         const domElement = e.target;
         const req = e.detail;
 
-        fetch(req).then(res => {
-            dispatchAjaxifyEvent(domElement, "load", res);
-        }).catch(err => {
-            if (dispatchAjaxifyEvent(domElement, "error", err)) {
-                throw err;
+        if (req.method !== "GET") {
+            fetch(req).then(function (res) {
+                dispatchAjaxifyEvent(domElement, "load", res);
+            }).catch(function (err) {
+                if (dispatchAjaxifyEvent(domElement, "error", err)) {
+                    throw err;
+                }
+            });
+        } else {
+            const html = knownUrls[req.url];
+            if (html) {
+                // construct new Response object with cached response content
+                const res = new Response(html);
+                Object.defineProperty(res, "url", {get: () => req.url});
+                
+                dispatchAjaxifyEvent(domElement, "load", res);
+            } else {
+                // fire off fetch request and cache its result for later
+                fetch(req).then(function (res) {
+                    if (res.ok && !res.bodyUsed) {
+                        res.clone().text().then(html =>{knownUrls[res.url] = html});
+                    }
+                    dispatchAjaxifyEvent(domElement, "load", res);;
+                }).catch(function (err) {
+                    if (dispatchAjaxifyEvent(domElement, "error", err)) {
+                        throw err;
+                    }
+                });
             }
-        });
+        }
     });
 
     attachNonPreventedListener(document, "ajaxify:load", (e) => {
@@ -114,8 +138,10 @@
                 if (res.url !== location.href.split("#")[0]) {
                     // update URL in address bar
                     history.pushState(domStates.length, doc.title, res.url);
+                    domStates.push(knownUrls.indexOf(res.url));
                 } else {
                     history.replaceState(domStates.length - 1, doc.title, res.url);
+                    domStates[domStates.length - 1] = knownUrls.indexOf(res.url);
                 }
             }
         }).catch(err => {
@@ -130,14 +156,6 @@
 
         lastDomState.body = document.body;
         lastDomState.title = document.title;
-
-        if (domStates.indexOf(lastDomState) >= 0) {
-            lastDomState = newDomState;
-        } else {
-            domStates.push(lastDomState);
-            // make sure that next state will be a new object
-            lastDomState = {};
-        }
         // update HTML
         document.documentElement.replaceChild(newDomState.body, document.body);
         // update page title
@@ -148,11 +166,12 @@
         const stateIndex = e.state;
         // numeric value indicates better-ajaxify state
         if (typeof stateIndex === "number") {
-            const domState = domStates[stateIndex];
-            if (domState) {
-                dispatchAjaxifyEvent(document, "render", domState);
+            const html = knownUrls[location.href];
+            if (html) {
+                const doc = parser.parseFromString(html, "text/html");
+                dispatchAjaxifyEvent(domElement, "render", doc);
             } else {
-                dispatchAjaxifyEvent(document, "fetch", new Request(location.href));
+                dispatchAjaxifyEvent(document, "fetch", new Request(location.href));   
             }
         }
 
